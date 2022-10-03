@@ -1,7 +1,10 @@
 import cv2
 
+from utils.matchers import FeatureMatcher
+
 
 class VideoFrameIndexError(IndexError):
+    """Raised when the wanted video frame is out of bounds."""
     def __init__(self, message="frame number out of bounds. The video has less frames."):
         super().__init__(message)
 
@@ -65,3 +68,47 @@ def get_frame(filename, frame_number=0):
             return frame
 
     raise VideoFrameIndexError
+
+
+def overlay_ar(frame, reference_frame, ar_layer, ar_mask):
+    """Overlay the AR layer onto the video frame. The overlay is done
+    originally on the reference frame, then a homography between the
+    reference frame and the original frame is computed using local
+    invariant features matching.
+    
+    The local invariant features are found using SIFT, the matches are
+    found using FLANN KDTree, and finally the homography is computed
+    on the resulting matches using RANSAC.
+
+    Parameters
+    ----------
+    frame : image
+        original video frame.
+    reference_frame : image
+        reference frame onto which the AR layer is initially projected.
+        Its resolution must be the same as ``original_frame``.
+    ar_layer : image
+        image that needs to be overlaid onto the video.
+        Its resolution must be the same as ``original_frame``.
+    ar_mask : image
+        mask for the AR layer.
+        Its resolution must be the same as ``original_frame``.
+
+    Returns
+    -------
+    image
+        the image with the overlaid AR layer.
+    """
+    h, w = frame.shape[0], frame.shape[1]
+
+    matcher = FeatureMatcher(reference_frame, frame)
+    matcher.find_matches()
+    H, _ = matcher.get_homography()
+
+    ar_layer_warped = cv2.warpPerspective(ar_layer, H, dsize=(w, h))
+    ar_mask_warped = cv2.warpPerspective(ar_mask, H, dsize=(w, h))
+
+    ar_frame = frame.copy()
+    ar_frame[ar_mask_warped==255] = ar_layer_warped[ar_mask_warped==255]
+
+    return ar_frame
