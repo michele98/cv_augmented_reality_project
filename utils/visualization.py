@@ -1,7 +1,7 @@
 import matplotlib.pyplot as plt
 from IPython.display import clear_output
 
-from utils.utils import frame_generator
+from utils.utils import frame_generator, VideoFrameIndexError
 
 
 def display_frames(filename, starting_frame=0, refresh_output=True):
@@ -11,12 +11,17 @@ def display_frames(filename, starting_frame=0, refresh_output=True):
     Parameters
     ----------
     filename : string
-        name of the video file
+        name of the video file.
     starting_frame : int, optional
-        by default 0
+        by default 0.
     refresh_output : bool, optional
-        choose whether each new frame clears the previous one, by
-        default True
+        choose whether each new frame clears the previous one,
+        by default True.
+
+    Raises
+    ------
+    VideoFrameIndexError
+        if ``starting_frame`` is greater than the number of frames in the video.
     """
     def display():
         if refresh_output: clear_output(wait = True)
@@ -35,5 +40,5 @@ def display_frames(filename, starting_frame=0, refresh_output=True):
             break
 
     if i < starting_frame:
-        print('There are less frames than starting_frame!')
+        raise VideoFrameIndexError
     print('Capture released')
