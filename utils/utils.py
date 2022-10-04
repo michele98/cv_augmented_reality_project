@@ -119,14 +119,19 @@ def save_ar_video(filename_src, filename_dst, ar_layer, ar_mask, reference_frame
 
     Parameters
     ----------
-    filename_src : _type_
-        _description_
-    filename_dst : _type_
-        _description_
-    ar_layer : _type_
-        _description_
-    ar_mask : _type_
-        _description_
+    filename : string
+        name of the source video file.
+    filename_dst : string
+        name of the destination video file.
+    ar_layer : image
+        image that needs to be overlaid onto the video.
+        Its resolution must be the same as ``original_frame``.
+    ar_mask : image
+        mask for the AR layer.
+        Its resolution must be the same as ``original_frame``.
+    reference_frame : image
+        reference frame onto which the AR layer is initially projected.
+        Its resolution must be the same as ``original_frame``.
     """
     if reference_frame is None:
         reference_frame = next(frame_generator(filename_src))
