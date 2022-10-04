@@ -49,6 +49,7 @@ def display_frames(filename, starting_frame=0, refresh_output=True):
 
 def display_ar_frames(filename, ar_layer, ar_mask, reference_frame=None, starting_frame=0, refresh_output=True):
     """Show the AR overlaid video frame by frame.
+    It uses the F2R method.
 
     Parameters
     ----------
