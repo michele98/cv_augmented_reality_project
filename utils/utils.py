@@ -112,3 +112,30 @@ def overlay_ar(frame, reference_frame, ar_layer, ar_mask):
     ar_frame[ar_mask_warped==255] = ar_layer_warped[ar_mask_warped==255]
 
     return ar_frame
+
+
+def save_ar_video(filename_src, filename_dst, ar_layer, ar_mask, reference_frame=None):
+    """Save the overlaid video
+
+    Parameters
+    ----------
+    filename_src : _type_
+        _description_
+    filename_dst : _type_
+        _description_
+    ar_layer : _type_
+        _description_
+    ar_mask : _type_
+        _description_
+    """
+    if reference_frame is None:
+        reference_frame = next(frame_generator(filename_src))
+
+    out = cv2.VideoWriter(filename_dst, cv2.VideoWriter_fourcc(*'XVID'), 30, (640, 480))
+    for i, frame in enumerate(frame_generator(filename_src)):
+        print(f"writing frame {i}", end = '\r')
+        ar_frame = overlay_ar(frame, reference_frame, ar_layer, ar_mask)
+        out.write(cv2.cvtColor(ar_frame, cv2.COLOR_RGB2BGR))
+    out.release()
+    print(f"writing frame {i}", end = '\r')
+    print('done')
