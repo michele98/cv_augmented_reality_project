@@ -107,7 +107,7 @@ def overlay_ar(frame, homography, ar_layer, ar_mask=None):
     return ar_frame
 
 
-def save_ar_video(filename_src, filename_dst, ar_layer, ar_mask=None, reference_image=None, drift_correction_step=0, start_frame=0, stop_frame=0, fps=30):
+def save_ar_video(filename_src, filename_dst, ar_layer, ar_mask=None, reference_image=None, reference_mask = None, drift_correction_step=0, start_frame=0, stop_frame=0, fps=30):
     """Save the AR overlaid video with the F2F (frame to frame) method,
     where the reference frame can be reset after a certain number of
     frames. If the correction is done at every frame, this effectively
@@ -128,6 +128,9 @@ def save_ar_video(filename_src, filename_dst, ar_layer, ar_mask=None, reference_
         reference image onto which the AR layer is projected.
         If not provided, the first video frame is used.
         It must have the same size as ``ar_layer``.
+    reference_mask : image, optional
+        mask that isolates the object of interest in the reference
+        image.
     drift_correction_step : int, optional
         this much passes until the homography is recomputed using the
         original reference frame. This is done to prevent drifting of
@@ -165,6 +168,11 @@ def save_ar_video(filename_src, filename_dst, ar_layer, ar_mask=None, reference_
                           fps=fps,
                           frameSize=(w, h))
 
+    if reference_mask is None:
+        reference_mask = np.ones(reference_image.shape[:2], dtype=np.uint8)*255
+    # mask reference image
+    reference_image[np.logical_not(reference_mask)] = 0
+
     # instantiate a FeatureMatcher for the reference image and the first frame
     matcher = FeatureMatcher(reference_image, first_frame)
     matcher.find_matches()
@@ -178,6 +186,9 @@ def save_ar_video(filename_src, filename_dst, ar_layer, ar_mask=None, reference_
     first_H, _ = matcher.get_homography()
     H_history = first_H
 
+    # warp the reference object mask
+    warped_reference_mask = cv2.warpPerspective(reference_mask, H_history, dsize=(w, h))
+
     # setup the process for f2f
     previous_frame = first_frame
     previous_keypoints = first_keypoints
@@ -188,13 +199,18 @@ def save_ar_video(filename_src, filename_dst, ar_layer, ar_mask=None, reference_
             break
 
         print(f"writing frame {i}", end = '\r')
+        # warp the reference object mask and mask the frame
+        masked_frame = np.copy(frame)
+        warped_reference_mask = cv2.warpPerspective(reference_mask, H_history, dsize=(w, h))
+        masked_frame[np.logical_not(warped_reference_mask)] = 0
+
         # reset homography history after a fixed number of frames
         if drift_correction_step>0 and i%drift_correction_step==0:
-            matcher = FeatureMatcher(reference_image, frame)
+            matcher = FeatureMatcher(reference_image, masked_frame)
             matcher.set_descriptors_1(reference_keypoints, reference_descriptors)
             H_history = np.eye(3)       # reset homography history
         else:
-            matcher = FeatureMatcher(previous_frame, frame)
+            matcher = FeatureMatcher(previous_frame, masked_frame)
             matcher.set_descriptors_1(previous_keypoints, previous_descriptors)
 
         # find the homography between the previous frame and the current one
@@ -206,7 +222,7 @@ def save_ar_video(filename_src, filename_dst, ar_layer, ar_mask=None, reference_
         ar_frame = overlay_ar(frame, H_history, ar_layer, ar_mask)
 
         # reset previous keypoints and frame for reuse in the next loop
-        previous_frame = frame
+        previous_frame = masked_frame
         _, previous_keypoints = matcher.get_keypoints()
         _, previous_descriptors = matcher.get_descriptors()
 
@@ -235,6 +251,9 @@ def save_ar_video_f2r(*args, **kwargs):
         reference image onto which the AR layer is projected.
         If not provided, the first video frame is used.
         It must have the same size as ``ar_layer``.
+    reference_mask : image, optional
+        mask that isolates the object of interest in the reference
+        image.
     start_frame : int, optional
         if provided, starts the rendering after this many frames.
     stop_frame : int, optional
@@ -265,6 +284,9 @@ def save_ar_video_f2f(*args, **kwargs):
         reference image onto which the AR layer is projected.
         If not provided, the first video frame is used.
         It must have the same size as ``ar_layer``.
+    reference_mask : image, optional
+        mask that isolates the object of interest in the reference
+        image.
     start_frame : int, optional
         if provided, starts the rendering after this many frames.
     stop_frame : int, optional
