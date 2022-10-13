@@ -216,7 +216,7 @@ def save_ar_video(filename_src, filename_dst, ar_layer, ar_mask=None, reference_
         # find the homography between the previous frame and the current one
         matcher.find_matches()
         H, _ = matcher.get_homography()
-        H_history = H_history@H # update the homography history
+        H_history = H@H_history # update the homography history
 
         # overlay the frame with the ar layer
         ar_frame = overlay_ar(frame, H_history, ar_layer, ar_mask)
