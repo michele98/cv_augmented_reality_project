@@ -6,3 +6,4 @@ out*.avi
 out*.mp4
 Extra_Data
 extra.ipynb
+.vscode
