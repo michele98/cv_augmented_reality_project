@@ -1,7 +1,7 @@
 import cv2
 import numpy as np
 
-from utils.matchers import FeatureMatcher
+from utils.matchers import FeatureMatcher, calculate_homography_harris
 
 
 class VideoFrameIndexError(IndexError):
@@ -10,33 +10,59 @@ class VideoFrameIndexError(IndexError):
         super().__init__(message)
 
 
-def frame_generator(filename):
+def frame_generator(filename, start_frame=None, stop_frame=None, verbose=True):
     """Generator that yields frames from a video.
 
     Parameters
     ----------
     filename : string
         name of the video file.
+    start_frame : int, optional
+        starting frame from which to read the video, by default 0
+    stop_frame : int, optional
+        final frame from which to read the video, by default the final frame
+    verbose : bool, optional
+        by default True
 
     Yields
-    -------
+    ------
     array
-        the current video frame. For color video, the channel order is
-        RGB.
+        the current video frame. The channel order is RGB.
 
     Raises
     ------
     FileNotFoundError
-        if the video file does not exist.
+        if the video file does not exist
+    ValueError
+        if start_frame >= stop_frame
     """
     cap = cv2.VideoCapture(filename)
     if not cap.isOpened():
         raise FileNotFoundError(f'Video file {filename} not found!')
 
+    if start_frame is None:
+        start_frame = 0
+
+    if stop_frame is None:
+        stop_frame = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+
+    if start_frame >= stop_frame:
+        raise ValueError("the starting frame must be smaller than the stopping frame.")
+
+    current_frame = start_frame
+    cap.set(cv2.CAP_PROP_POS_FRAMES, current_frame)
+
     ret, frame = cap.read()
-    while(ret):
+    for i in range(start_frame, stop_frame):
+        if verbose: print(f"writing frame {i-start_frame+1} of {stop_frame-start_frame}".ljust(80), end = '\r')
         yield cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+
         ret, frame = cap.read()
+        if not ret:
+            if verbose: print("Finished prematurely".ljust(80))
+            break
+    if verbose: print(f"writing frame {i-start_frame+1} of {stop_frame-start_frame}".ljust(80))
+    if verbose: print("Finished frames.")
     cap.release()
 
 
@@ -107,7 +133,12 @@ def overlay_ar(frame, homography, ar_layer, ar_mask=None):
     return ar_frame
 
 
-def save_ar_video(filename_src, filename_dst, ar_layer, ar_mask=None, reference_image=None, reference_mask = None, drift_correction_step=0, start_frame=0, stop_frame=0, fps=30):
+def save_ar_video(filename_src, filename_dst, ar_layer,
+                  ar_mask=None,
+                  reference_image=None, reference_mask = None,
+                  drift_correction_step=0,
+                  start_frame=None, stop_frame=None, fps=None,
+                  min_matches_f2r=50):
     """Save the AR overlaid video with the F2F (frame to frame) method,
     where the reference frame can be reset after a certain number of
     frames. If the correction is done at every frame, this effectively
@@ -143,22 +174,28 @@ def save_ar_video(filename_src, filename_dst, ar_layer, ar_mask=None, reference_
         The count starts from frame 0 of the original video, and it
         needs to be greater than ``start_frame``.
     fps : int, optional
-        frames per second of the video, by default 30.
+        frames per second of the video, by default the ones of the source video.
+    min_matches_f2r: int, optional
+        minimum number of matches for using f2r to correct f2f drift. By default 50
     """
-    frame_gen = frame_generator(filename_src) #initialize frame generator
+    # read the source video to get fps and resolution
+    # and set the resolution of the output video as the one of the input video
+    cap = cv2.VideoCapture(filename_src)
+    if start_frame is not None:
+        cap.set(cv2.CAP_PROP_POS_FRAMES, start_frame)
+    ret, first_frame = cap.read()
+    if not ret:
+        cap.release()
+        raise RuntimeError(f"Failed to video in {filename_src}")
 
-    #go to the first wanted frame
-    for i, frame in enumerate(frame_gen):
-        first_frame = frame
-        if i==start_frame:
-            break
+    if fps is None:
+        fps = cap.get(cv2.CAP_PROP_FPS)
+    cap.release()
 
     if reference_image is None:
         reference_image = first_frame
     if drift_correction_step < 0:
         raise ValueError("the drift correction step must be positive.")
-    if start_frame >= stop_frame and stop_frame > 0:
-        raise ValueError("the starting frame must be smaller than the stopping frame.")
 
     # create the VideoWriter object
     # and set the resolution of the output video as the one of the input video
@@ -194,29 +231,30 @@ def save_ar_video(filename_src, filename_dst, ar_layer, ar_mask=None, reference_
     previous_keypoints = first_keypoints
     previous_descriptors = first_descriptors
 
-    for i, frame in enumerate(frame_gen, start=start_frame):
-        if stop_frame > 0 and i==stop_frame:
-            break
-
-        print(f"writing frame {i}", end = '\r')
+    for i, frame in enumerate(frame_generator(filename_src, start_frame, stop_frame)):
         # warp the reference object mask and mask the frame
-        masked_frame = np.copy(frame)
         warped_reference_mask = cv2.warpPerspective(reference_mask, H_history, dsize=(w, h))
+        masked_frame = np.copy(frame)
         masked_frame[np.logical_not(warped_reference_mask)] = 0
 
-        # reset homography history after a fixed number of frames
-        if drift_correction_step>0 and i%drift_correction_step==0:
-            matcher = FeatureMatcher(reference_image, masked_frame)
-            matcher.set_descriptors_1(reference_keypoints, reference_descriptors)
-            H_history = np.eye(3)       # reset homography history
-        else:
-            matcher = FeatureMatcher(previous_frame, masked_frame)
-            matcher.set_descriptors_1(previous_keypoints, previous_descriptors)
+        # f2f matching
+        matcher = FeatureMatcher(previous_frame, masked_frame)
+        matcher.set_descriptors_1(previous_keypoints, previous_descriptors)
 
         # find the homography between the previous frame and the current one
         matcher.find_matches()
-        H, _ = matcher.get_homography()
-        H_history = H@H_history # update the homography history
+        H_f2f, _ = matcher.get_homography()
+
+        H_history = H_f2f@H_history # update the homography history
+
+        if drift_correction_step>0 and i%drift_correction_step==0:
+            # reset homography history (f2r matching) if it makes sense to do it
+            matcher = FeatureMatcher(reference_image, masked_frame)
+            matcher.set_descriptors_1(reference_keypoints, reference_descriptors)
+            matcher.find_matches()
+
+            if len(matcher.get_matches()) >= min_matches_f2r:
+                H_history, _ = matcher.get_homography()
 
         # overlay the frame with the ar layer
         ar_frame = overlay_ar(frame, H_history, ar_layer, ar_mask)
@@ -228,8 +266,6 @@ def save_ar_video(filename_src, filename_dst, ar_layer, ar_mask=None, reference_
 
         out.write(cv2.cvtColor(ar_frame, cv2.COLOR_RGB2BGR))
     out.release()
-    print(f"writing frame {i}")
-    print('done.')
 
 
 def save_ar_video_f2r(*args, **kwargs):
