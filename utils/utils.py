@@ -1,7 +1,7 @@
 import cv2
 import numpy as np
 
-from utils.matchers import FeatureMatcher, calculate_homography_harris
+from utils.matchers import FeatureMatcher
 
 
 class VideoFrameIndexError(IndexError):
@@ -138,7 +138,10 @@ def save_ar_video(filename_src, filename_dst, ar_layer,
                   reference_image=None, reference_mask = None,
                   drift_correction_step=0,
                   start_frame=None, stop_frame=None, fps=None,
-                  min_matches_f2r=50):
+                  min_matches_f2r=50,
+                  algorithm_f2f=None,
+                  algorithm_f2r=None,
+                  mark_f2r=False):
     """Save the AR overlaid video with the F2F (frame to frame) method,
     where the reference frame can be reset after a certain number of
     frames. If the correction is done at every frame, this effectively
@@ -211,10 +214,10 @@ def save_ar_video(filename_src, filename_dst, ar_layer,
     reference_image[np.logical_not(reference_mask)] = 0
 
     # instantiate a FeatureMatcher for the reference image and the first frame
-    matcher = FeatureMatcher(reference_image, first_frame)
+    matcher = FeatureMatcher(reference_image, first_frame, algorithm_f2r)
     matcher.find_matches()
 
-    # get keypoints and SIFT descriptors for the first video frame
+    # get keypoints and descriptors for the first video frame
     # this is done to save computation time later
     reference_keypoints, first_keypoints = matcher.get_keypoints()
     reference_descriptors, first_descriptors = matcher.get_descriptors()
@@ -223,46 +226,53 @@ def save_ar_video(filename_src, filename_dst, ar_layer,
     first_H, _ = matcher.get_homography()
     H_history = first_H
 
-    # warp the reference object mask
-    warped_reference_mask = cv2.warpPerspective(reference_mask, H_history, dsize=(w, h))
-
     # setup the process for f2f
     previous_frame = first_frame
-    previous_keypoints = first_keypoints
-    previous_descriptors = first_descriptors
+    if type(algorithm_f2f) is type(algorithm_f2r):
+        previous_keypoints = first_keypoints
+        previous_descriptors = first_descriptors
+    else:
+        matcher = FeatureMatcher(first_frame, first_frame, algorithm_f2f)
+        matcher._find_descriptors_1()
+        previous_keypoints, _ = matcher.get_keypoints()
+        previous_descriptors, _ = matcher.get_descriptors()
 
     for i, frame in enumerate(frame_generator(filename_src, start_frame, stop_frame)):
+        used_f2r = False
         # warp the reference object mask and mask the frame
         warped_reference_mask = cv2.warpPerspective(reference_mask, H_history, dsize=(w, h))
         masked_frame = np.copy(frame)
         masked_frame[np.logical_not(warped_reference_mask)] = 0
 
-        # f2f matching
-        matcher = FeatureMatcher(previous_frame, masked_frame)
-        matcher.set_descriptors_1(previous_keypoints, previous_descriptors)
-
-        # find the homography between the previous frame and the current one
-        matcher.find_matches()
-        H_f2f, _ = matcher.get_homography()
-
-        H_history = H_f2f@H_history # update the homography history
-
-        if drift_correction_step>0 and i%drift_correction_step==0:
-            # reset homography history (f2r matching) if it makes sense to do it
-            matcher = FeatureMatcher(reference_image, masked_frame)
+        if drift_correction_step>0 and i%drift_correction_step==0: # f2r matching
+            matcher = FeatureMatcher(reference_image, masked_frame, algorithm_f2r)
             matcher.set_descriptors_1(reference_keypoints, reference_descriptors)
             matcher.find_matches()
 
-            if len(matcher.get_matches()) >= min_matches_f2r:
+            if len(matcher.get_matches()) >= min_matches_f2r or drift_correction_step==0:
                 H_history, _ = matcher.get_homography()
+                used_f2r = True
+
+        if not used_f2r: # f2f matching
+            matcher = FeatureMatcher(previous_frame, masked_frame, algorithm_f2f)
+            matcher.set_descriptors_1(previous_keypoints, previous_descriptors)
+
+            # find the homography between the previous frame and the current one
+            matcher.find_matches()
+            H_f2f, _ = matcher.get_homography()
+
+            H_history = H_f2f@H_history # update the homography history
+
+            # reset previous keypoints and frame for reuse in the next loop
+            _, previous_keypoints = matcher.get_keypoints()
+            _, previous_descriptors = matcher.get_descriptors()
+            previous_frame = masked_frame
 
         # overlay the frame with the ar layer
         ar_frame = overlay_ar(frame, H_history, ar_layer, ar_mask)
 
-        # reset previous keypoints and frame for reuse in the next loop
-        previous_frame = masked_frame
-        _, previous_keypoints = matcher.get_keypoints()
-        _, previous_descriptors = matcher.get_descriptors()
+        if mark_f2r and used_f2r:
+            ar_frame = cv2.putText(ar_frame, 'F2R', (50, 50), cv2.FONT_HERSHEY_DUPLEX, 2, (255,255,255))
 
         out.write(cv2.cvtColor(ar_frame, cv2.COLOR_RGB2BGR))
     out.release()

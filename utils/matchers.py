@@ -18,14 +18,14 @@ class FeatureMatcher():
     _homography_mask = []
 
     # Constructor, initialize the sift, model and scene
-    def __init__(self, im1, im2):
-        self._sift = cv2.xfeatures2d.SIFT_create()
+    def __init__(self, im1, im2, algorithm=None):
+        self._sift = cv2.xfeatures2d.SIFT_create() if algorithm is None else algorithm
         self.im1 = im1
         self.im2 = im2
 
     # methods
-    # Set methods
 
+    # Set methods
     def set_match_distance_threshold(self, threshold):
         self._homography_parameters['match_distance_threshold'] = threshold
 
@@ -77,10 +77,14 @@ class FeatureMatcher():
 
     # Other methods
     def _find_descriptors_1(self):
-        self._kp1, self._des1 = self._sift.compute(self.im1, self._sift.detect(self.im1))
+        # self._kp1, self._des1 = self._sift.compute(self.im1, self._sift.detect(self.im1))
+        self._kp1, self._des1 = self._sift.detectAndCompute(self.im1, None)
+        self._des1 = self._des1.astype(np.float32)
 
     def _find_descriptors_2(self):
-        self._kp2, self._des2 = self._sift.compute(self.im2, self._sift.detect(self.im2))
+        # self._kp2, self._des2 = self._sift.compute(self.im2, self._sift.detect(self.im2))
+        self._kp2, self._des2 = self._sift.detectAndCompute(self.im2, None)
+        self._des2 = self._des2.astype(np.float32)
 
     # Computes matches between model and scene
     # force: recomputes the matches if the method "find_matches" has already been called. Default is False.
@@ -125,7 +129,7 @@ class FeatureMatcher():
 
         if len(src_pts)>=4:
             homography, homography_mask = cv2.findHomography(src_pts, dst_pts, cv2.RANSAC, reproj_th)
-            if not homography is None:
+            if homography is not None:
                 self._homography = homography
                 self._homography_mask = homography_mask
 
