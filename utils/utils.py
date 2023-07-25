@@ -44,7 +44,7 @@ def frame_generator(filename, start_frame=None, stop_frame=None, verbose=True):
         start_frame = 0
 
     if stop_frame is None:
-        stop_frame = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        stop_frame = int(cap.get(cv2.CAP_PROP_FRAME_COUNT)) - 1
 
     if start_frame >= stop_frame:
         raise ValueError("the starting frame must be smaller than the stopping frame.")
@@ -54,15 +54,15 @@ def frame_generator(filename, start_frame=None, stop_frame=None, verbose=True):
 
     ret, frame = cap.read()
     for i in range(start_frame, stop_frame):
-        if verbose: print(f"writing frame {i-start_frame+1} of {stop_frame-start_frame}".ljust(80), end = '\r')
+        if verbose: print(f"frame {i-start_frame+1} of {stop_frame-start_frame}".ljust(80), end = '\r')
         yield cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
 
         ret, frame = cap.read()
         if not ret:
             if verbose: print("Finished prematurely".ljust(80))
             break
-    if verbose: print(f"writing frame {i-start_frame+1} of {stop_frame-start_frame}".ljust(80))
-    if verbose: print("Finished frames.")
+    if verbose: print(f"frame {i-start_frame+1} of {stop_frame-start_frame}".ljust(80))
+    # if verbose: print("Finished frames.")
     cap.release()
 
 
@@ -133,15 +133,96 @@ def overlay_ar(frame, homography, ar_layer, ar_mask=None):
     return ar_frame
 
 
+def compute_homographies(filename_src,
+                         first_frame,
+                         reference_image=None, reference_mask=None,
+                         drift_correction_step=0,
+                         start_frame=None, stop_frame=None,
+                         min_matches_f2r=50,
+                         algorithm_f2f=None,
+                         algorithm_f2r=None,
+                         mark_f2r=False):
+    """Compute the homographies"""
+    print("Computing homographies")
+    if drift_correction_step < 0:
+        raise ValueError("the drift correction step must be positive.")
+
+    # create the VideoWriter object
+    # and set the resolution of the output video as the one of the input video
+    h, w = reference_image.shape[0], reference_image.shape[1]
+    homographies = []
+
+    if reference_mask is None:
+        reference_mask = np.ones(reference_image.shape[:2], dtype=np.uint8)*255
+    # mask reference image
+    reference_image[np.logical_not(reference_mask)] = 0
+
+    # instantiate a FeatureMatcher for the reference image and the first frame
+    matcher = FeatureMatcher(reference_image, first_frame, algorithm_f2r)
+    matcher.find_matches()
+
+    # get keypoints and descriptors for the first video frame
+    # this is done to save computation time later
+    reference_keypoints, first_keypoints = matcher.get_keypoints()
+    reference_descriptors, first_descriptors = matcher.get_descriptors()
+
+    # compute the initial homography between the reference image and the first video frame
+    first_H, _ = matcher.get_homography()
+    H_f2r = first_H
+
+    # setup the process for f2f
+    previous_frame = first_frame
+    if type(algorithm_f2f) is type(algorithm_f2r):
+        previous_keypoints = first_keypoints
+        previous_descriptors = first_descriptors
+    else:
+        matcher = FeatureMatcher(first_frame, first_frame, algorithm_f2f)
+        matcher._find_descriptors_1()
+        previous_keypoints, _ = matcher.get_keypoints()
+        previous_descriptors, _ = matcher.get_descriptors()
+
+    for i, frame in enumerate(frame_generator(filename_src, start_frame, stop_frame)):
+        used_f2r = False
+        # warp the reference object mask and mask the frame
+        warped_reference_mask = cv2.warpPerspective(reference_mask, H_f2r, dsize=(w, h))
+        masked_frame = np.copy(frame)
+        masked_frame[np.logical_not(warped_reference_mask)] = 0
+
+        if drift_correction_step>0 and i%drift_correction_step==0: # f2r matching
+            matcher = FeatureMatcher(reference_image, masked_frame, algorithm_f2r)
+            matcher.set_descriptors_1(reference_keypoints, reference_descriptors)
+            matcher.find_matches()
+
+            if len(matcher.get_matches()) >= min_matches_f2r or drift_correction_step==0:
+                H_f2r, _ = matcher.get_homography()
+                used_f2r = True
+
+        if not used_f2r: # f2f matching
+            matcher = FeatureMatcher(previous_frame, masked_frame, algorithm_f2f)
+            matcher.set_descriptors_1(previous_keypoints, previous_descriptors)
+
+            # find the homography between the previous frame and the current one
+            matcher.find_matches()
+            H_f2f, _ = matcher.get_homography()
+
+            H_f2r = H_f2f@H_f2r # update the homography history
+
+            # reset previous keypoints and frame for reuse in the next loop
+            _, previous_keypoints = matcher.get_keypoints()
+            _, previous_descriptors = matcher.get_descriptors()
+            previous_frame = masked_frame
+
+        homographies.append(H_f2r)
+    return homographies
+
+
+import time
+
 def save_ar_video(filename_src, filename_dst, ar_layer,
+                  start_frame=None, stop_frame=None,
                   ar_mask=None,
-                  reference_image=None, reference_mask = None,
-                  drift_correction_step=0,
-                  start_frame=None, stop_frame=None, fps=None,
-                  min_matches_f2r=50,
-                  algorithm_f2f=None,
-                  algorithm_f2r=None,
-                  mark_f2r=False):
+                  fps=None,
+                  **kwargs):
     """Save the AR overlaid video with the F2F (frame to frame) method,
     where the reference frame can be reset after a certain number of
     frames. If the correction is done at every frame, this effectively
@@ -195,10 +276,11 @@ def save_ar_video(filename_src, filename_dst, ar_layer,
         fps = cap.get(cv2.CAP_PROP_FPS)
     cap.release()
 
-    if reference_image is None:
-        reference_image = first_frame
-    if drift_correction_step < 0:
-        raise ValueError("the drift correction step must be positive.")
+    t0 = time.time()
+    homographies = compute_homographies(filename_src, first_frame, **kwargs)
+    t1 = time.time()
+    print(f"Time for matching: {t1-t0:.2g}s")
+    print("\nWriting video")
 
     # create the VideoWriter object
     # and set the resolution of the output video as the one of the input video
@@ -208,74 +290,18 @@ def save_ar_video(filename_src, filename_dst, ar_layer,
                           fps=fps,
                           frameSize=(w, h))
 
-    if reference_mask is None:
-        reference_mask = np.ones(reference_image.shape[:2], dtype=np.uint8)*255
-    # mask reference image
-    reference_image[np.logical_not(reference_mask)] = 0
-
-    # instantiate a FeatureMatcher for the reference image and the first frame
-    matcher = FeatureMatcher(reference_image, first_frame, algorithm_f2r)
-    matcher.find_matches()
-
-    # get keypoints and descriptors for the first video frame
-    # this is done to save computation time later
-    reference_keypoints, first_keypoints = matcher.get_keypoints()
-    reference_descriptors, first_descriptors = matcher.get_descriptors()
-
-    # compute the initial homography between the reference image and the first video frame
-    first_H, _ = matcher.get_homography()
-    H_history = first_H
-
-    # setup the process for f2f
-    previous_frame = first_frame
-    if type(algorithm_f2f) is type(algorithm_f2r):
-        previous_keypoints = first_keypoints
-        previous_descriptors = first_descriptors
-    else:
-        matcher = FeatureMatcher(first_frame, first_frame, algorithm_f2f)
-        matcher._find_descriptors_1()
-        previous_keypoints, _ = matcher.get_keypoints()
-        previous_descriptors, _ = matcher.get_descriptors()
-
-    for i, frame in enumerate(frame_generator(filename_src, start_frame, stop_frame)):
-        used_f2r = False
-        # warp the reference object mask and mask the frame
-        warped_reference_mask = cv2.warpPerspective(reference_mask, H_history, dsize=(w, h))
-        masked_frame = np.copy(frame)
-        masked_frame[np.logical_not(warped_reference_mask)] = 0
-
-        if drift_correction_step>0 and i%drift_correction_step==0: # f2r matching
-            matcher = FeatureMatcher(reference_image, masked_frame, algorithm_f2r)
-            matcher.set_descriptors_1(reference_keypoints, reference_descriptors)
-            matcher.find_matches()
-
-            if len(matcher.get_matches()) >= min_matches_f2r or drift_correction_step==0:
-                H_history, _ = matcher.get_homography()
-                used_f2r = True
-
-        if not used_f2r: # f2f matching
-            matcher = FeatureMatcher(previous_frame, masked_frame, algorithm_f2f)
-            matcher.set_descriptors_1(previous_keypoints, previous_descriptors)
-
-            # find the homography between the previous frame and the current one
-            matcher.find_matches()
-            H_f2f, _ = matcher.get_homography()
-
-            H_history = H_f2f@H_history # update the homography history
-
-            # reset previous keypoints and frame for reuse in the next loop
-            _, previous_keypoints = matcher.get_keypoints()
-            _, previous_descriptors = matcher.get_descriptors()
-            previous_frame = masked_frame
-
+    t0 = time.time()
+    for frame, homography in zip(frame_generator(filename_src, start_frame, stop_frame), homographies):
         # overlay the frame with the ar layer
-        ar_frame = overlay_ar(frame, H_history, ar_layer, ar_mask)
+        ar_frame = overlay_ar(frame, homography, ar_layer, ar_mask)
 
-        if mark_f2r and used_f2r:
-            ar_frame = cv2.putText(ar_frame, 'F2R', (50, 50), cv2.FONT_HERSHEY_DUPLEX, 2, (255,255,255))
+        # if mark_f2r and used_f2r:
+        #     ar_frame = cv2.putText(ar_frame, 'F2R', (50, 50), cv2.FONT_HERSHEY_DUPLEX, 2, (255,255,255))
 
         out.write(cv2.cvtColor(ar_frame, cv2.COLOR_RGB2BGR))
     out.release()
+    t1 = time.time()
+    print(f"Time for writing video: {t1-t0:.2g}s")
 
 
 def save_ar_video_f2r(*args, **kwargs):
