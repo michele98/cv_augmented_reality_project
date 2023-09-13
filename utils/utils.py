@@ -4,12 +4,6 @@ import numpy as np
 from utils.matchers import FeatureMatcher
 
 
-class VideoFrameIndexError(IndexError):
-    """Raised when the wanted video frame is out of bounds."""
-    def __init__(self, message="frame number out of bounds. The video has less frames."):
-        super().__init__(message)
-
-
 def frame_generator(filename, start_frame=None, stop_frame=None, verbose=True):
     """Generator that yields frames from a video.
 
@@ -78,24 +72,17 @@ def get_frame(filename, frame_number=0):
 
     Returns
     -------
-    array
+    np.ndarray
         the frame corresponding to ``frame_number``. For color video,
         the channel order is RGB.
-
-        Returns ``None`` if ``frame_number`` is larger than the total
-        number of frames in the video or if the video file is not
-        found.
-
-    Raises
-    ------
-    VideoFrameIndexError
-        if ``frame_number`` is greater than the number of frames in the video.
     """
-    for i, frame in enumerate(frame_generator(filename)):
-        if i == frame_number:
-            return frame
-
-    raise VideoFrameIndexError
+    cap = cv2.VideoCapture(filename)
+    cap.set(cv2.CAP_PROP_POS_FRAMES, frame_number)
+    ret, frame = cap.read()
+    if not ret:
+        cap.release()
+        raise RuntimeError(f"Failed to read {filename}")
+    return frame
 
 
 def overlay_ar(frame, homography, ar_layer, ar_mask=None):
@@ -116,7 +103,7 @@ def overlay_ar(frame, homography, ar_layer, ar_mask=None):
 
     Returns
     -------
-    image
+    np.ndarray
         the image with the overlaid AR layer.
     """
     if ar_mask is None:
@@ -134,21 +121,62 @@ def overlay_ar(frame, homography, ar_layer, ar_mask=None):
 
 
 def compute_homographies(filename_src,
-                         first_frame,
+                         first_frame=None,
                          reference_image=None, reference_mask=None,
                          drift_correction_step=0,
                          start_frame=None, stop_frame=None,
                          min_matches_f2r=50,
                          algorithm_f2f=None,
-                         algorithm_f2r=None,
-                         mark_f2r=False):
-    """Compute the homographies"""
+                         algorithm_f2r=None):
+    """Compute the homographies for all the frames.
+
+    Parameters
+    ----------
+    filename_src : string
+        name of the source video file.
+    first_frame : image, optional
+        first frame of the video. If not provided, it is automatically found.
+    reference_image : image, optional
+        reference image onto which the AR layer is projected.
+        If not provided, the first video frame is used.
+        It must have the same size as ``ar_layer``.
+    reference_mask : image, optional
+        mask that isolates the object of interest in the reference
+        image.
+    drift_correction_step : int, optional
+        this much passes until the homography is recomputed using the
+        original reference frame. This is done to prevent drifting of
+        the AR layer. Setting this to 1 makes this effectively a F2R
+        matching method.
+    start_frame : int, optional
+        if provided, starts the rendering after this many frames.
+    stop_frame : int, optional
+        if provided, stops the rendering after this many frames.
+        The count starts from frame 0 of the original video, and it
+        needs to be greater than ``start_frame``.
+    min_matches_f2r: int, optional
+        minimum number of matches for using f2r to correct f2f drift. By default 50
+    algorithm_f2r:
+        feature detection algorithm used for the f2r method.
+        Pass the output of cv2.SIFT_create() or similar.
+    algorithm_f2f:
+        feature detection algorithm used for the f2f method.
+        Pass the output of cv2.SIFT_create() or similar.
+
+    Returns
+    -------
+    list of np.ndarray
+        list of homographies, each an array of shape (3,3).
+    """
     print("Computing homographies")
     if drift_correction_step < 0:
         raise ValueError("the drift correction step must be positive.")
 
-    # create the VideoWriter object
-    # and set the resolution of the output video as the one of the input video
+    first_frame = get_frame(filename_src, start_frame)
+
+    if reference_image is None:
+        reference_image = first_frame
+
     h, w = reference_image.shape[0], reference_image.shape[1]
     homographies = []
 
@@ -193,7 +221,7 @@ def compute_homographies(filename_src,
             matcher.set_descriptors_1(reference_keypoints, reference_descriptors)
             matcher.find_matches()
 
-            if len(matcher.get_matches()) >= min_matches_f2r or drift_correction_step==0:
+            if len(matcher.get_matches()) >= min_matches_f2r:
                 H_f2r, _ = matcher.get_homography()
                 used_f2r = True
 
@@ -222,6 +250,7 @@ def save_ar_video(filename_src, filename_dst, ar_layer,
                   start_frame=None, stop_frame=None,
                   ar_mask=None,
                   fps=None,
+                  mark_f2r=False,
                   **kwargs):
     """Save the AR overlaid video with the F2F (frame to frame) method,
     where the reference frame can be reset after a certain number of
@@ -230,12 +259,24 @@ def save_ar_video(filename_src, filename_dst, ar_layer,
 
     Parameters
     ----------
-    filename : string
+    filename_src : string
         name of the source video file.
     filename_dst : string
         name of the destination video file.
     ar_layer : image
         image that needs to be overlaid onto the video.
+    start_frame : int, optional
+        if provided, starts the rendering after this many frames.
+    stop_frame : int, optional
+        if provided, stops the rendering after this many frames.
+        The count starts from frame 0 of the original video, and it
+        needs to be greater than ``start_frame``.
+    fps : int, optional
+        frames per second of the video, by default the ones of the source video.
+    mark_f2r: bool, optional
+        mark each frame in which the homography is computed using the F2R method.
+        By default False
+    **kwargs:
     ar_mask : image, optional
         mask for the AR layer.
         Its resolution must be the same as ``ar_layer``.
@@ -251,27 +292,21 @@ def save_ar_video(filename_src, filename_dst, ar_layer,
         original reference frame. This is done to prevent drifting of
         the AR layer. Setting this to 1 makes this effectively a F2R
         matching method.
-    start_frame : int, optional
-        if provided, starts the rendering after this many frames.
-    stop_frame : int, optional
-        if provided, stops the rendering after this many frames.
-        The count starts from frame 0 of the original video, and it
-        needs to be greater than ``start_frame``.
-    fps : int, optional
-        frames per second of the video, by default the ones of the source video.
     min_matches_f2r: int, optional
         minimum number of matches for using f2r to correct f2f drift. By default 50
+    algorithm_f2r:
+        feature detection algorithm used for the f2r method.
+        Pass the output of cv2.SIFT_create() or similar.
+    algorithm_f2f:
+        feature detection algorithm used for the f2f method.
+        Pass the output of cv2.SIFT_create() or similar.
     """
     # read the source video to get fps and resolution
     # and set the resolution of the output video as the one of the input video
-    cap = cv2.VideoCapture(filename_src)
-    if start_frame is not None:
-        cap.set(cv2.CAP_PROP_POS_FRAMES, start_frame)
-    ret, first_frame = cap.read()
-    if not ret:
-        cap.release()
-        raise RuntimeError(f"Failed to video in {filename_src}")
 
+    first_frame = get_frame(filename_src, start_frame)
+
+    cap = cv2.VideoCapture(filename_src)
     if fps is None:
         fps = cap.get(cv2.CAP_PROP_FPS)
     cap.release()
@@ -291,12 +326,14 @@ def save_ar_video(filename_src, filename_dst, ar_layer,
                           frameSize=(w, h))
 
     t0 = time.time()
-    for frame, homography in zip(frame_generator(filename_src, start_frame, stop_frame), homographies):
+    for i, (frame, homography) in enumerate(zip(frame_generator(filename_src, start_frame, stop_frame), homographies)):
         # overlay the frame with the ar layer
         ar_frame = overlay_ar(frame, homography, ar_layer, ar_mask)
 
-        # if mark_f2r and used_f2r:
-        #     ar_frame = cv2.putText(ar_frame, 'F2R', (50, 50), cv2.FONT_HERSHEY_DUPLEX, 2, (255,255,255))
+        if 'drift_correction_step' in kwargs.keys() and mark_f2r:
+            s = kwargs['drift_correction_step']
+            if s>0 and i%s == 0:
+                ar_frame = cv2.putText(ar_frame, 'F2R', (50, 50), cv2.FONT_HERSHEY_DUPLEX, 2, (255,255,255))
 
         out.write(cv2.cvtColor(ar_frame, cv2.COLOR_RGB2BGR))
     out.release()
