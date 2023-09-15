@@ -173,11 +173,11 @@ def compute_homographies(filename_src,
         raise ValueError("the drift correction step must be positive.")
 
     first_frame = get_frame(filename_src, start_frame)
+    h, w = first_frame.shape[0], first_frame.shape[1]
 
     if reference_image is None:
         reference_image = first_frame
 
-    h, w = reference_image.shape[0], reference_image.shape[1]
     homographies = []
 
     if reference_mask is None:
@@ -312,7 +312,7 @@ def save_ar_video(filename_src, filename_dst, ar_layer,
     cap.release()
 
     t0 = time.time()
-    homographies = compute_homographies(filename_src, first_frame, **kwargs)
+    homographies = compute_homographies(filename_src, first_frame, start_frame=start_frame, stop_frame=stop_frame, **kwargs)
     t1 = time.time()
     print(f"Time for matching: {t1-t0:.2g}s")
     print("\nWriting video")
